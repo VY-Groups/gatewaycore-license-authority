@@ -1,0 +1,24 @@
+name: Authority development CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  build-test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2022]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+      - run: dotnet run --project tests/OfflineLicensing/OfflineLicensing.csproj --configuration Release
+      - run: dotnet build tools/LicensePortal/LicensePortal.csproj --configuration Release
+      - run: dotnet build tools/LicenseIssuerWorker/LicenseIssuerWorker.csproj --configuration Release
