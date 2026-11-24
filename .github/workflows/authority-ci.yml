@@ -3,7 +3,7 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
+    branches: [main, feature/authority-bootstrap]
 permissions:
   contents: read
 jobs:
@@ -50,6 +50,13 @@ jobs:
           ref: 58f55b98b253c023d0ec824f17e001c9677c1929
           path: customer-contract
           persist-credentials: false
+      - name: Ensure PostgreSQL recovery client tools
+        run: |
+          if ! command -v pg_dump || ! command -v pg_restore; then
+            sudo apt-get update
+            sudo apt-get install -y postgresql-client-16
+          fi
+          pg_dump --version
       - run: dotnet build tests/CustomerInterop/CustomerInterop.csproj --configuration Release
       - run: dotnet run --project tests/PostgresAcceptance/PostgresAcceptance.csproj --configuration Release
         env:

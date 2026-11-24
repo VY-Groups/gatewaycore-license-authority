@@ -8,5 +8,6 @@
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="../../tools/LicenseIssuerWorker/LicenseIssuerWorker.csproj" />
+    <ProjectReference Include="../../tools/AuthorityRecovery/AuthorityRecovery.csproj" />
   </ItemGroup>
 </Project>
