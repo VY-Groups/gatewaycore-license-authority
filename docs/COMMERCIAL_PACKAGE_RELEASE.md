@@ -6,7 +6,7 @@ This procedure creates five independently verifiable commercial packages from an
 
 - Use a private, access-controlled signing host and private staging volume. The authority repository is public at this time; do not put real private keys, production package artifacts, customer data, or release secrets in GitHub Actions or this repository.
 - Use a release signing key that is separate from all entitlement keys. Keep its encrypted PKCS#8 PEM and passphrase in approved company custody, outside both repositories and all package/output directories.
-- Pin the release key's public SPKI in the customer source's `GatewayCore.ReleaseTrust` file and pin entitlement public keys separately in `GatewayCore.CommercialTrust`. The tool checks that the release key ID exists and that the release and entitlement public keys have different fingerprints.
+- Commit the release public SPKI and entitlement public keys as separate JSON trust files in the exact customer source commit. The tool rejects trust files that are not tracked by that checkout, checks that the release key ID exists, and requires the release and entitlement public keys to have different fingerprints. The customer project embeds the files supplied through `GatewayCoreReleaseTrustFile` and `GatewayCoreTrustFile`.
 - Review and freeze the exact customer commit. The tool rejects a mismatched or dirty customer checkout.
 
 ## Build, sign, and verify

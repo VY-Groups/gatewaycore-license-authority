@@ -65,6 +65,13 @@ function Read-PublicTrust([string]$Path, [string]$Label) {
     finally { $document.Dispose() }
 }
 
+function Assert-CustomerPinnedFile([string]$Path, [string]$Label, [string]$CustomerRoot) {
+    if (-not (Is-Within $Path $CustomerRoot)) { throw "$Label must be pinned in the exact customer source checkout." }
+    $relative = [IO.Path]::GetRelativePath($CustomerRoot, $Path).Replace([IO.Path]::DirectorySeparatorChar, '/')
+    $null = & git -C $CustomerRoot ls-files --error-unmatch -- $relative 2>$null
+    if ($LASTEXITCODE -ne 0) { throw "$Label is not tracked by the exact customer source commit." }
+}
+
 function Invoke-Checked([string]$Executable, [string[]]$Arguments, [string]$Label) {
     & $Executable @Arguments
     if ($LASTEXITCODE -ne 0) { throw "$Label failed with exit code $LASTEXITCODE." }
@@ -103,12 +110,19 @@ if (@($releaseKeys.Values | Where-Object { $entitlementKeys.Values -contains $_ 
 }
 
 $outputPath = [IO.Path]::GetFullPath($OutputDirectory)
-if ((Is-Within $outputPath $customerRoot) -or (Is-Within $customerRoot $outputPath)) {
-    throw 'OutputDirectory and the customer source checkout must be separate trees.'
+$authorityRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
+if ((Is-Within $outputPath $customerRoot) -or (Is-Within $customerRoot $outputPath) -or
+    (Is-Within $outputPath $authorityRoot) -or (Is-Within $authorityRoot $outputPath)) {
+    throw 'OutputDirectory must be separate from both source repositories.'
+}
+if ((Is-Within $keyPath $customerRoot) -or (Is-Within $keyPath $authorityRoot)) {
+    throw 'The encrypted release private key must be outside both source repositories.'
 }
 foreach ($controlFile in @($keyPath, $releaseTrustPath, $entitlementTrustPath)) {
     if (Is-Within $controlFile $outputPath) { throw 'Signing keys and trust inputs must remain outside the package output tree.' }
 }
+Assert-CustomerPinnedFile $releaseTrustPath 'Release public trust' $customerRoot
+Assert-CustomerPinnedFile $entitlementTrustPath 'Entitlement public trust' $customerRoot
 if (Test-Path -LiteralPath $outputPath) {
     if ((Get-Item -LiteralPath $outputPath -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) {
         throw 'OutputDirectory cannot be a link or junction.'
@@ -131,7 +145,6 @@ $projects = @(
     @{ Name = 'authoritative-dns'; Project = 'engines/GslbDns/GslbDns.csproj'; Dll = 'GslbDns.dll' },
     @{ Name = 'gslb-observer'; Project = 'engines/GslbObserver/GslbObserver.csproj'; Dll = 'GslbObserver.dll' }
 )
-$authorityRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
 $signerProject = Join-Path $authorityRoot 'tools/ReleaseManifestSigner/ReleaseManifestSigner.csproj'
 $sums = [Collections.Generic.List[string]]::new()
 
