@@ -1,0 +1,26 @@
+[Unit]
+Description=GatewayCore license %i portal
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=gc-license-%i
+Group=gc-license-%i
+WorkingDirectory=/opt/gatewaycore/license-portal
+EnvironmentFile=/etc/gatewaycore/license-%i/portal.env
+Environment=Portal__Role=%i
+ExecStart=/usr/bin/dotnet /opt/gatewaycore/license-portal/LicensePortal.dll
+Restart=on-failure
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectProc=invisible
+ProcSubset=pid
+PrivateDevices=true
+RestrictSUIDSGID=true
+UMask=0077
+# Use separate hosts for stronger isolation; no shared writable deployment path.
+[Install]
+WantedBy=multi-user.target
