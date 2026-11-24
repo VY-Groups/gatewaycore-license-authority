@@ -14,9 +14,8 @@ try
     switch(args[0])
     {
         case "provision" when args.Length==4:
-            store.Initialize();
-            goto case "request";
         case "request" when args.Length==4:
+            if(args[0]=="provision")store.Initialize();
             using(var file=new FileStream(args[3],FileMode.CreateNew))
                 file.Write(store.ExportActivationRequest());
             break;

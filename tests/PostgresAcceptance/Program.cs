@@ -132,7 +132,7 @@ try
     var rotatedBytes=Encoding.ASCII.GetBytes((await ExecuteNew(nextJob))!);
     var oldOnly=new OfflineLicenseVerifier(new Dictionary<string,byte[]> { ["test-pg"]=signingKey.ExportSubjectPublicKeyInfo() });
     try{oldOnly.Verify(rotatedBytes,updated.InstallationKeySha256,now);throw new Exception("FAIL: unstaged trust accepted");}
-    catch(CryptographicException){Check(true,"old-only customer trust rejects new signer");}
+    catch(InvalidDataException){Check(true,"old-only customer trust rejects new signer");}
     updated=stores[winnerIndex].Import(rotatedBytes,now);
     Check(updated.Revision==3 && updated.Allows("monitoring"),"staged dual-trust customer accepts new signer without losing allocation");
     var revoke=Guid.NewGuid();
