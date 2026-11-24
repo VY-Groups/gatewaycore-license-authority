@@ -220,7 +220,7 @@ try
         }
         await Exec(requester,"""
             INSERT INTO gc_subscriptions(id,customer_id,deployment_id,edition,max_nodes,max_sites,expires_at,features)
-            VALUES('interop-license','ci-customer','interop-deployment','standard',1,1,$1,ARRAY['l7','monitoring'])
+            VALUES('interop-license','ci-customer','interop-deployment','standard',1,1,$1,ARRAY['l7','monitoring','ha','fleet'])
             """,now.AddDays(30));
         var independentInvoice=await Invoice("interop-license");
         Check(await Pay(independentInvoice,"payment-ci-interop")==1,"independent SDK contract paid");
@@ -244,7 +244,12 @@ try
         var firstPath=await IssueIndependent("first");
         var independentActive=(await Customer("import",firstPath))!.Value;
         Check(independentActive.GetProperty("revision").GetInt64()==1 &&
-            independentActive.GetProperty("validity").GetString()=="Active","actual other-repository SDK imports database-signed license");
+            independentActive.GetProperty("validity").GetString()=="Active" &&
+            independentActive.GetProperty("siteId").GetString()=="dc","actual other-repository SDK imports database-signed site-bound license");
+        var challenge=Convert.ToHexString(RandomNumberGenerator.GetBytes(32));
+        var proof=(await Customer("proof",challenge))!.Value.GetProperty("proof").GetString()!;
+        Check(verifier.VerifyInstallationProof(Encoding.ASCII.GetBytes(proof),challenge,now).SiteId=="dc",
+            "actual independent customer executable proves site-bound allocation");
         var secondPath=await IssueIndependent("second");
         var independentRenewed=(await Customer("import",secondPath))!.Value;
         Check(independentRenewed.GetProperty("revision").GetInt64()==2 &&
@@ -264,9 +269,59 @@ try
             "independent customer imports real database-signed revocation");
         Check((await Customer("inspect"))!.Value.GetProperty("validity").GetString()=="Revoked","revocation persists in separate customer process");
         await Customer("import",secondPath,1);
+        await Customer("proof",Convert.ToHexString(RandomNumberGenerator.GetBytes(32)),1);
         Console.WriteLine("CROSS_REPOSITORY_OFFLINE_INTEROP_PASS");
     }
     finally{Directory.Delete(interop,true);}
+    // A real paid three-node contract allows only two sites. Each proof is
+    // produced by a separately provisioned installation and bound to the DB-issued site.
+    var fleetDirs=Enumerable.Range(0,3).Select(i=>root+"-fleet-"+i).ToArray();
+    try
+    {
+        var fleetStores=fleetDirs.Select(d=>new OfflineLicenseStore(d,verifier)).ToArray();
+        foreach(var node in fleetStores)node.Initialize();
+        await Exec(requester,"""
+            INSERT INTO gc_subscriptions(id,customer_id,deployment_id,edition,max_nodes,max_sites,expires_at,features)
+            VALUES('fleet-db','ci-customer','fleet-db-deployment','enterprise',3,2,$1,ARRAY['l7','ha','fleet','dc-dr'])
+            """,now.AddDays(30));
+        var fleetInvoice=await Invoice("fleet-db");
+        Check(await Pay(fleetInvoice,"payment-ci-fleet")==1,"paid DC/DR contract");
+        async Task<Guid> FleetRequest(int index,string site)
+        {
+            var bytes=fleetStores[index].ExportActivationRequest();
+            var parsed=OfflineActivationRequest.Verify(bytes);
+            var id=Guid.NewGuid();
+            await Exec(requester,"""
+                INSERT INTO gc_license_jobs(id,subscription_id,kind,expected_terms_revision,site_id,request_id,installation_hash,request_file,requested_by)
+                VALUES($1,'fleet-db','issue',1,$2,$3,$4,$5,'alice')
+                """,id,site,parsed.RequestId,parsed.InstallationKeySha256,Encoding.ASCII.GetString(bytes));
+            Check(await Approve(id)==1,"fleet request independently approved");
+            return id;
+        }
+        async Task<VerifiedLicense> Activate(int index,string site)
+        {
+            var result=await ExecuteNew(await FleetRequest(index,site))??throw new InvalidOperationException("Missing fleet envelope");
+            return fleetStores[index].Import(Encoding.ASCII.GetBytes(result),now);
+        }
+        var localFleet=await Activate(0,"dc");
+        var drFleet=await Activate(1,"dr");
+        Check(localFleet.SiteId=="dc" && drFleet.SiteId=="dr","database issuer signs exact allocated sites");
+        var overflowSite=await FleetRequest(2,"third-site");
+        await Denied(()=>ExecuteNew(overflowSite),"third site denied even with unused node seat");
+        var transfer=await FleetRequest(1,"dc");
+        await Denied(()=>ExecuteNew(transfer),"existing installation cannot transfer signed site");
+        var sameSite=await Activate(2,"dr");
+        var peers=new List<VerifiedLicense>();
+        foreach(var node in fleetStores)
+        {
+            var nonce=Convert.ToHexString(RandomNumberGenerator.GetBytes(32));
+            peers.Add(verifier.VerifyInstallationProof(node.CreateInstallationProof(nonce,now),nonce,now));
+        }
+        FleetLicensePolicy.Validate(localFleet,peers,now);
+        Check(sameSite.SiteId=="dr","three distinct signed allocations across two authorized sites");
+        Console.WriteLine("DATABASE_SITE_BOUND_FLEET_ACCEPTANCE_PASS");
+    }
+    finally{foreach(var d in fleetDirs)if(Directory.Exists(d))Directory.Delete(d,true);}
     await RecoveryAcceptance.Run(cfg,admin,nextSigningKey,revoke,revoked,replacement,retry);
     Console.WriteLine("POSTGRES_AUTHORITY_ACCEPTANCE_PASS");
 }

@@ -25,6 +25,9 @@ try
         case "revoke" when args.Length==4:
             Report(store.ImportRevocation(File.ReadAllBytes(args[3]),now));
             break;
+        case "proof" when args.Length==4:
+            Console.WriteLine(JsonSerializer.Serialize(new {proof=System.Text.Encoding.ASCII.GetString(store.CreateInstallationProof(args[3],now))}));
+            break;
         case "inspect" when args.Length==3:
             Report(store.Inspect(now)??throw new InvalidOperationException("Missing license."));
             break;
@@ -36,5 +39,5 @@ catch(Exception e){Console.Error.WriteLine("Customer SDK rejected: "+e.GetType()
 static void Report(VerifiedLicense license)
 {
     Console.WriteLine(JsonSerializer.Serialize(new { revision=license.Revision,allocationId=license.AllocationId,
-        validity=license.Validity.ToString(),features=license.Features.Order(StringComparer.Ordinal).ToArray() }));
+        validity=license.Validity.ToString(),siteId=license.SiteId,features=license.Features.Order(StringComparer.Ordinal).ToArray() }));
 }

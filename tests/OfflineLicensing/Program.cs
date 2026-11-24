@@ -277,4 +277,5 @@ try
     Reject(() => releaseVerifier.Verify(package, commit), "missing package binary");
 }
 finally { if (Directory.Exists(package)) Directory.Delete(package, true); }
+FleetProofAcceptance.Run();
 Console.WriteLine("OFFLINE_LICENSE_VERIFIER_ACCEPTANCE_PASS");
