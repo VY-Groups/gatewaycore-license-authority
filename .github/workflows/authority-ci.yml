@@ -47,7 +47,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: VY-Groups/yarp-lb
-          ref: aa9fd6310bb44777a065b32658be772c4c2fb2cf
+          ref: b92cda53c7f7a22e4497903a8a4118f9089577da
           path: customer-contract
           persist-credentials: false
       - name: Ensure PostgreSQL recovery client tools
@@ -90,7 +90,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: VY-Groups/yarp-lb
-          ref: aa9fd6310bb44777a065b32658be772c4c2fb2cf
+          ref: b92cda53c7f7a22e4497903a8a4118f9089577da
           path: customer-contract
           persist-credentials: false
       - run: dotnet run --project tests/CommercialCandidate/CommercialCandidate.csproj --configuration Release -- packages
@@ -101,7 +101,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: VY-Groups/yarp-lb
-          ref: aa9fd6310bb44777a065b32658be772c4c2fb2cf
+          ref: b92cda53c7f7a22e4497903a8a4118f9089577da
           path: customer-contract
           persist-credentials: false
       - name: Verify exact shared protocol snapshot
