@@ -59,6 +59,21 @@ public sealed class ApprovedJobExecutor(NpgsqlDataSource db, ECDsa signer, strin
         var terms=new Subscription(id,(string)sub[0]!, (string)sub[1]!, (string)sub[2]!,
             (int)sub[3]!, (int)sub[4]!, (long)sub[5]!, (string[])sub[6]!);
         var kind=(string)job[1]!;
+        // Exact contractual terms, rather than terms_revision, bind settlement:
+        // a signing-key rotation alone must not require duplicate payment.
+        async Task RequireSettlement(Guid? renewalJob,string edition)
+        {
+            if(edition=="evaluation")return;
+            var hash=renewalJob is Guid renewalId
+                ? await Scalar("SELECT public.gc_billing_terms($1,$2)",id,renewalId)
+                : await Scalar("SELECT public.gc_billing_terms($1,NULL::uuid)",id);
+            if(hash is not string digest || await Scalar("""
+                SELECT EXISTS(SELECT 1 FROM public.gc_billing_invoices
+                  WHERE subscription_id=$1 AND terms_hash=$2 AND state='paid')
+                """,id,digest) is not true)
+                throw new InvalidOperationException("Exact commercial subscription terms require independently confirmed payment.");
+        }
+        if(kind=="issue")await RequireSettlement(null,terms.Edition);
         if (kind != "rotate_authority" && (nextSigner is not null || nextKeyId is not null))
             throw new InvalidOperationException("Second signing key is only permitted for rotation.");
         // Rotation requires an already established authority, not an implicit first signer.
@@ -153,6 +168,7 @@ public sealed class ApprovedJobExecutor(NpgsqlDataSource db, ECDsa signer, strin
             var sites=(long)(await Scalar("SELECT count(DISTINCT site_id) FROM gc_issuer_allocations WHERE subscription_id=$1",id))!;
             if(next.LicenseId!=id || next.CustomerId!=terms.CustomerId || next.DeploymentId!=terms.DeploymentId ||
                 next.MaxNodes<seats || next.MaxSites<sites) throw new InvalidOperationException("Terms conflict with committed allocation.");
+            await RequireSettlement(jobId,next.Edition);
             // Use the same cryptographic schema validation as actual licenses.
             var hash=new string('A',64);var utc=now.ToUnixTimeSeconds();
             var test=Sign("GCL1",new{schemaVersion=1,product="GatewayCore",licenseId=id,customerId=next.CustomerId,

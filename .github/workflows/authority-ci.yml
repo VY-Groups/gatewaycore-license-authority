@@ -3,7 +3,7 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main, feature/authority-bootstrap]
+    branches: [main, feature/authority-bootstrap, feature/authority-recovery]
 permissions:
   contents: read
 jobs:
