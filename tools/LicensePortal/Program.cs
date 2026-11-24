@@ -6,6 +6,11 @@ using Npgsql;
 using GatewayCore.Licensing;
 using GatewayCore.LicenseAuthority;
 
+if (args.Length == 1 && args[0] == "--hash-password")
+{
+    OperatorPasswordSessions.ProvisionPasswordHash();
+    return;
+}
 var builder = WebApplication.CreateBuilder(args);
 var config = builder.Configuration;
 var pinPath = config["Portal:OperatorPins"] ?? throw new InvalidOperationException("Operator certificate pins required.");
@@ -20,6 +25,8 @@ if (operators.Count is < 2 or > 100 ||
     operators.Values.Select(x => x.Id).Distinct(StringComparer.Ordinal).Count() != operators.Count ||
     !operators.Values.Any(x => x.Role == "requester") || !operators.Values.Any(x => x.Role == "reviewer"))
     throw new InvalidDataException("Require distinct pinned operator identities and roles.");
+var sessions = new OperatorPasswordSessions(config["Portal:PasswordHashes"] ??
+    throw new InvalidOperationException("Operator password hash file required."), operators.Values);
 
 PortalOperator? Identity(X509Certificate2? cert)
 {
@@ -73,11 +80,44 @@ app.Use(async (ctx, next) =>
             ctx.Request.Headers.Origin != expectedOrigin.GetLeftPart(UriPartial.Authority))
         { ctx.Response.StatusCode = 403; return; }
     }
+    // TLS client certificate is factor one. No sensitive API is accessible
+    // without the independent password factor and a short-lived session.
+    var path = ctx.Request.Path;
+    var publicPath = ctx.Request.Method == "GET" &&
+        (path == "/" || path == "/index.html" || path == "/portal.css" || path == "/portal.js" || path == "/api/session");
+    var sessionAction = ctx.Request.Method == "POST" &&
+        (path == "/api/session/login" || path == "/api/session/logout");
+    if (!publicPath && !sessionAction && !sessions.Valid(actor, ctx.Request.Cookies[OperatorPasswordSessions.CookieName], DateTimeOffset.UtcNow))
+    { ctx.Response.StatusCode = 401; return; }
     await next();
 });
 app.UseDefaultFiles();
 app.UseStaticFiles();
-app.MapGet("/api/session", (HttpContext ctx) => Results.Ok(Actor(ctx)));
+app.MapGet("/api/session", (HttpContext ctx) =>
+{
+    var actor = Actor(ctx);
+    return Results.Ok(new { authenticated = sessions.Valid(actor,ctx.Request.Cookies[OperatorPasswordSessions.CookieName],DateTimeOffset.UtcNow),
+        actor.Id, actor.Role });
+});
+app.MapPost("/api/session/login", (HttpContext ctx, OperatorLogin input) =>
+{
+    var actor = Actor(ctx);
+    var token = sessions.Login(actor,input.Password,DateTimeOffset.UtcNow);
+    if (token is null)
+    {
+        app.Logger.LogWarning("Operator password factor denied for {Operator}", actor.Id);
+        return Results.Json(new { error = "Authentication failed or temporarily rate limited." },statusCode:401);
+    }
+    ctx.Response.Cookies.Append(OperatorPasswordSessions.CookieName,token,OperatorPasswordSessions.Cookie());
+    app.Logger.LogInformation("Operator multifactor session established for {Operator}",actor.Id);
+    return Results.Ok(new { authenticated = true, actor.Id, actor.Role });
+});
+app.MapPost("/api/session/logout", (HttpContext ctx) =>
+{
+    sessions.Logout(Actor(ctx),ctx.Request.Cookies[OperatorPasswordSessions.CookieName],DateTimeOffset.UtcNow);
+    ctx.Response.Cookies.Delete(OperatorPasswordSessions.CookieName,OperatorPasswordSessions.Cookie());
+    return Results.Ok(new { authenticated = false });
+});
 app.MapGet("/api/customers", async (NpgsqlDataSource ds) => Results.Ok(await ReadRows(ds,
     "SELECT id,name,created_at FROM gc_customers ORDER BY created_at DESC LIMIT 500")));
 app.MapGet("/api/subscriptions", async (NpgsqlDataSource ds) => Results.Ok(await ReadRows(ds,
@@ -263,3 +303,5 @@ internal sealed record PortalOperator(string Id, string Role);
 internal sealed record CustomerInput(string Id, string Name);
 internal sealed record JobInput(string SubscriptionId, string Kind, string? SiteId, string? RequestFile, string? AllocationId);
 internal sealed record DecisionInput(string Decision);
+
+internal sealed record OperatorLogin(string? Password);

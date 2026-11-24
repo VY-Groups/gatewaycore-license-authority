@@ -46,6 +46,8 @@ jobs:
       - run: dotnet run --project tests/PostgresAcceptance/PostgresAcceptance.csproj --configuration Release
         env:
           GC_PG_TEST: Host=127.0.0.1;Port=5432;Database=gatewaycore_ci;Username=postgres;Password=disposable-ci-admin
+      - run: dotnet build tools/LicensePortal/LicensePortal.csproj --configuration Release
+      - run: python3 tests/PortalAcceptance/https_mfa.py
   customer-protocol-snapshot:
     runs-on: ubuntu-24.04
     steps:

@@ -5,7 +5,7 @@ async function api(path,body){
   const options={credentials:'same-origin',cache:'no-store'};
   if(body!==undefined){options.method='POST';options.headers={'Content-Type':'application/json','X-GC-Portal':'1'};options.body=JSON.stringify(body)}
   const r=await fetch('/api/'+path,options);
-  if(!r.ok){let msg='HTTP '+r.status;try{msg=(await r.json()).error||msg}catch{}throw Error(msg)}
+  if(!r.ok){if(r.status===401)showSession(null);let msg='HTTP '+r.status;try{msg=(await r.json()).error||msg}catch{}throw Error(msg)}
   return await r.json();
 }
 function table(target,rows,action){
@@ -35,4 +35,18 @@ form('customer',f=>api('customers',{id:f.get('id'),name:f.get('name')}));
 form('subscription',(f,submit)=>api(submit.value==='renew'?'subscriptions/'+encodeURIComponent(f.get('licenseId'))+'/renew':'subscriptions',{licenseId:f.get('licenseId'),customerId:f.get('customerId'),deploymentId:f.get('deploymentId'),edition:f.get('edition'),maxNodes:Number(f.get('maxNodes')),maxSites:Number(f.get('maxSites')),expiresAt:Math.floor(Date.parse(f.get('expiry')+'T00:00:00Z')/1000),features:f.get('features').split(',').map(x=>x.trim())}));
 form('issue',async f=>{const file=f.get('request');if(!file||file.size>4096)throw Error('Invalid request size');await api('jobs',{kind:'issue',subscriptionId:f.get('subscriptionId'),siteId:f.get('siteId'),requestFile:await file.text(),allocationId:null})});
 form('revoke',f=>api('jobs',{kind:'revoke',subscriptionId:f.get('subscriptionId'),allocationId:f.get('allocationId'),siteId:null,requestFile:null}));
-(async()=>{actor=await api('session');el('identity').textContent=actor.id+' · '+actor.role;el('requester').hidden=actor.role!=='requester';await refresh()})().catch(e=>el('message').textContent=String(e));
+function showSession(info){
+  actor=info?.authenticated?info:null;
+  el('identity').textContent=actor?actor.id+' · '+actor.role:'Certificate verified · password required';
+  el('signin').hidden=!!actor;el('logout').hidden=!actor;
+  el('records').hidden=!actor;el('requester').hidden=!actor||actor.role!=='requester';
+  if(!actor)for(const id of ['customers','subscriptions','jobs'])el(id).replaceChildren();
+}
+el('login').onsubmit=async event=>{
+  event.preventDefault();const submit=event.submitter;submit.disabled=true;
+  try{const result=await api('session/login',{password:new FormData(event.target).get('password')});
+    showSession(result);el('message').textContent='Signed in';await refresh()}
+  catch(e){el('message').textContent=String(e)}finally{event.target.reset();submit.disabled=false}
+};
+el('logout').onclick=async()=>{try{await api('session/logout',{});showSession(null);el('message').textContent='Signed out'}catch(e){el('message').textContent=String(e)}};
+(async()=>{showSession(await api('session'));if(actor)await refresh()})().catch(e=>el('message').textContent=String(e));
