@@ -5,7 +5,7 @@ CREATE OR REPLACE FUNCTION public.gc_billing_terms(p_subscription text,p_renewal
 RETURNS text LANGUAGE sql STABLE SET search_path=pg_catalog AS $$
     SELECT encode(sha256(convert_to(
       CASE WHEN p_renewal IS NULL THEN jsonb_build_array(s.id,s.customer_id,s.deployment_id,
-        s.edition,s.max_nodes,s.max_sites,extract(epoch FROM s.expires_at)::bigint,
+        s.edition,s.max_nodes,s.max_sites,floor(extract(epoch FROM s.expires_at))::bigint,
         to_jsonb(s.features))
       ELSE jsonb_build_array(j.proposed_terms->>'LicenseId',j.proposed_terms->>'CustomerId',
         j.proposed_terms->>'DeploymentId',j.proposed_terms->>'Edition',
