@@ -369,7 +369,7 @@ app.MapGet("/api/jobs/{id:guid}/approved-package", async (HttpContext ctx, Guid 
     await using var cmd = new NpgsqlCommand("""
         SELECT j.id,j.kind,j.site_id,j.request_file,j.allocation_id,j.requested_by,j.approved_by,
         s.id AS license_id,s.customer_id,s.deployment_id,s.edition,s.max_nodes,s.max_sites,
-        extract(epoch from s.expires_at)::bigint AS expires_at,s.features
+        floor(extract(epoch from s.expires_at))::bigint AS expires_at,s.features
         FROM gc_license_jobs j JOIN gc_subscriptions s ON s.id=j.subscription_id
         WHERE j.id=$1 AND j.state='approved' AND j.expected_terms_revision=s.terms_revision
         """, conn);

@@ -50,7 +50,7 @@ public sealed class ApprovedJobExecutor(NpgsqlDataSource db, ECDsa signer, strin
             """,jobId) ?? throw new InvalidOperationException("No independently approved job.");
         var id=(string)job[0]!;
         var sub=await Row("""
-            SELECT customer_id,deployment_id,edition,max_nodes,max_sites,extract(epoch from expires_at)::bigint,
+            SELECT customer_id,deployment_id,edition,max_nodes,max_sites,floor(extract(epoch from expires_at))::bigint,
             features,terms_revision FROM gc_subscriptions WHERE id=$1 FOR UPDATE
             """,id) ?? throw new InvalidOperationException("Unknown subscription.");
         var committed=await Row("SELECT envelope FROM gc_issuer_results WHERE job_id=$1",jobId);
