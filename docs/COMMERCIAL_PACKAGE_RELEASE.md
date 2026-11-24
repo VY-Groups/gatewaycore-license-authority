@@ -7,6 +7,7 @@ This procedure creates five independently verifiable commercial packages from an
 - Use a private, access-controlled signing host and private staging volume. The authority repository is public at this time; do not put real private keys, production package artifacts, customer data, or release secrets in GitHub Actions or this repository.
 - Use a release signing key that is separate from all entitlement keys. Keep its encrypted PKCS#8 PEM and passphrase in approved company custody, outside both repositories and all package/output directories.
 - Commit the release public SPKI and entitlement public keys as separate JSON trust files in the exact customer source commit. The tool rejects trust files that are not tracked by that checkout, checks that the release key ID exists, and requires the release and entitlement public keys to have different fingerprints. The customer project embeds the files supplied through `GatewayCoreReleaseTrustFile` and `GatewayCoreTrustFile`.
+- Do not use the ephemeral CI keys for commercial distribution. If the exact customer commit does not yet contain owner-approved production public trust files, stop: production package signing cannot proceed until the owner creates and pins the public trust through a reviewed customer PR.
 - Review and freeze the exact customer commit. The tool rejects a mismatched or dirty customer checkout.
 
 ## Build, sign, and verify
@@ -20,8 +21,8 @@ pwsh -NoProfile -File .\ops\release\build-commercial-packages.ps1 `
   -RuntimeIdentifier win-x64 `
   -ReleaseKeyId <pinned-release-key-id> `
   -EncryptedReleaseKey C:\secure\release-key.pem `
-  -ReleasePublicTrust C:\secure\release-trust.json `
-  -EntitlementPublicTrust C:\secure\entitlement-trust.json `
+  -ReleasePublicTrust C:\release\customer-source\path\release-trust.json `
+  -EntitlementPublicTrust C:\release\customer-source\path\entitlement-trust.json `
   -OutputDirectory C:\private-staging\gatewaycore-release
 ```
 
