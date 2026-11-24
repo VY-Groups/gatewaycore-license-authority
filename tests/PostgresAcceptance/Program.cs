@@ -16,10 +16,11 @@ if (cfg.Host != "127.0.0.1" || cfg.Database != "gatewaycore_ci" || cfg.Username 
     throw new InvalidOperationException("Not a disposable database.");
 await using var admin = NpgsqlDataSource.Create(cfg.ConnectionString);
 await Exec(admin, File.ReadAllText("tools/LicensePortal/schema.sql"));
-foreach (var role in new[] { "gc_portal_requester", "gc_portal_reviewer", "gc_issuer_runtime" })
+foreach (var role in new[] { "gc_portal_requester", "gc_portal_reviewer", "gc_issuer_runtime", "gc_recovery_reader" })
     await Exec(admin, $"CREATE ROLE {role} LOGIN PASSWORD 'disposable-ci-{role}' NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT");
 await Exec(admin, File.ReadAllText("tools/LicensePortal/migration-002-authority-rotation.sql"));
 await Exec(admin, File.ReadAllText("tools/LicensePortal/runtime-grants.sql"));
+await Exec(admin, File.ReadAllText("tools/AuthorityRecovery/recovery-grants.sql"));
 NpgsqlDataSource Role(string role) => NpgsqlDataSource.Create(new NpgsqlConnectionStringBuilder(cfg.ConnectionString)
     { Username = role, Password = "disposable-ci-" + role }.ConnectionString);
 await using var requester = Role("gc_portal_requester");
@@ -227,6 +228,7 @@ try
         Console.WriteLine("CROSS_REPOSITORY_OFFLINE_INTEROP_PASS");
     }
     finally{Directory.Delete(interop,true);}
+    await RecoveryAcceptance.Run(cfg,admin,nextSigningKey,revoke,revoked,replacement,retry);
     Console.WriteLine("POSTGRES_AUTHORITY_ACCEPTANCE_PASS");
 }
 finally

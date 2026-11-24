@@ -1,0 +1,12 @@
+# Authority ledger recovery (development acceptance)
+ 
+Maintain a separate recovery operator, database read-only role and independent P-256 recovery signing key. Provision gc_recovery_reader without memberships in requester, reviewer or issuer roles; apply recovery-grants.sql after the schema and rotation migration. The recovery executable requires that exact login and uses a read-only repeatable-read transaction.
+
+## Backup and recovery ceremony
+
+1. Fence all issuer workers and portal mutations. Preserve externally protected recent ledger checkpoint and independent encrypted signing-key backups. Never let two restored authority instances issue concurrently.
+2. Set GATEWAYCORE_RECOVERY_DB via protected configuration for gc_recovery_reader. Run `dotnet run --project tools/AuthorityRecovery -- checkpoint RECOVERY_KEY_ID ENCRYPTED_RECOVERY_PEM CHECKPOINT_FILE` interactively. Store the signed checkpoint externally in immutable, versioned custody. Take a PostgreSQL custom-format dump and separate protected role/ACL backup while the ledger remains fenced.
+3. Restore into an isolated PostgreSQL database with independently provisioned roles, ACLs and credentials. Run `dotnet run --project tools/AuthorityRecovery -- verify RECOVERY_KEY_ID RECOVERY_PUBLIC_PEM LATEST_CHECKPOINT_FILE` against the restored database using the independently pinned public key. A mismatch must keep issuance fenced; never overwrite the external checkpoint with a stale restore.
+4. Recover the exact current encrypted issuer private key under dual custody; verify the public fingerprint against restored issuer authority and validate committed results, allocation restrictions and revocations. Independently authorize failover only after fencing the old authority and checking all post-backup transactions.
+
+CI performs real pg_dump/pg_restore, independent signed checkpoint verification, stale restore rejection, encrypted current key recovery and restored worker idempotence and revocation checks. This tests logical ledger recovery, not a production recovery time or recovery point objective. The latest checkpoint and signing-key backups must be protected independently. The verifier is a manual release gate, not an automatic distributed fencing service; PostgreSQL HA, WAL/PITR after the checkpoint, loss of all key backups, external audit immutability and operational failover remain separate acceptance gates. Never commit production keys, dumps, credentials or customer data.
