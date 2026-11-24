@@ -149,6 +149,62 @@ app.MapGet("/api/subscriptions", async (NpgsqlDataSource ds) => Results.Ok(await
 app.MapGet("/api/jobs", async (NpgsqlDataSource ds) => Results.Ok(await ReadRows(ds,
     "SELECT j.id,j.subscription_id,j.kind,j.site_id,j.installation_hash,j.allocation_id,j.requested_by,j.requested_at,j.approved_by,j.approved_at,j.state,j.expected_terms_revision,j.proposed_terms::text AS proposed_terms,r.completed_at FROM gc_license_jobs j LEFT JOIN gc_issuer_results r ON r.job_id=j.id ORDER BY j.requested_at DESC LIMIT 500")));
 
+app.MapGet("/api/billing/invoices", async (NpgsqlDataSource ds) => Results.Ok(await ReadRows(ds,
+    "SELECT id,subscription_id,renewal_job_id,terms_hash,currency,amount_minor,state,requested_by,created_at,decided_by,decided_at,payment_reference,paid_minor FROM gc_billing_invoices ORDER BY created_at DESC LIMIT 500")));
+app.MapPost("/api/billing/invoices", async (HttpContext ctx, InvoiceInput input) =>
+{
+    if(Actor(ctx).Role!="requester")return Results.StatusCode(403);
+    if(!Id(input.SubscriptionId) || input.Currency is not ("INR" or "USD" or "EUR" or "GBP" or "AUD" or "CAD" or "SGD" or "AED") ||
+       input.AmountMinor is < 1 or > 1000000000000L)return Results.BadRequest();
+    var id=Guid.NewGuid();
+    await using var conn=await db.OpenConnectionAsync();
+    await using var tx=await conn.BeginTransactionAsync();
+    try
+    {
+        await using var cmd=new NpgsqlCommand("""
+            INSERT INTO gc_billing_invoices(id,subscription_id,renewal_job_id,terms_hash,currency,amount_minor,requested_by)
+            SELECT $1,$2,$3,hash,$4,$5,$6 FROM
+              (SELECT public.gc_billing_terms($2,$3) AS hash) v WHERE hash IS NOT NULL
+            """,conn,tx);
+        cmd.Parameters.AddWithValue(id);cmd.Parameters.AddWithValue(input.SubscriptionId);
+        cmd.Parameters.Add(new NpgsqlParameter{NpgsqlDbType=NpgsqlTypes.NpgsqlDbType.Uuid,Value=(object?)input.RenewalJobId??DBNull.Value});
+        cmd.Parameters.AddWithValue(input.Currency);cmd.Parameters.AddWithValue(input.AmountMinor);cmd.Parameters.AddWithValue(Actor(ctx).Id);
+        if(await cmd.ExecuteNonQueryAsync()!=1)return Results.NotFound();
+        await Audit(conn,tx,Actor(ctx).Id,"invoice_created",id.ToString());
+        await tx.CommitAsync();
+        return Results.Ok(new {id});
+    }
+    catch(PostgresException e) when(e.SqlState is "23505" or "23514" or "23503")
+    {return Results.Conflict(new {error="Duplicate invoice or changed contractual terms."});}
+});
+app.MapPost("/api/billing/invoices/{id:guid}/decision", async (HttpContext ctx,Guid id,InvoiceDecision input) =>
+{
+    if(Actor(ctx).Role!="reviewer")return Results.StatusCode(403);
+    if(input.Decision is not ("paid" or "void") ||
+       (input.Decision=="paid" && (input.PaidMinor is null or < 1 || input.PaymentReference is not {Length:>=1 and <=120} ||
+        input.PaymentReference.Any(c=>!char.IsAsciiLetterOrDigit(c)&&c is not ('.' or '_' or ':' or '/' or '-')))) ||
+       (input.Decision=="void" && (input.PaidMinor is not null || input.PaymentReference is not null)))
+        return Results.BadRequest();
+    await using var conn=await db.OpenConnectionAsync();
+    await using var tx=await conn.BeginTransactionAsync();
+    try
+    {
+        await using var cmd=new NpgsqlCommand("""
+            UPDATE gc_billing_invoices SET state=$1,decided_by=$2,decided_at=now(),payment_reference=$3,paid_minor=$4
+            WHERE id=$5 AND state='pending' AND requested_by<>$2
+            """,conn,tx);
+        cmd.Parameters.AddWithValue(input.Decision);cmd.Parameters.AddWithValue(Actor(ctx).Id);
+        cmd.Parameters.Add(new NpgsqlParameter{NpgsqlDbType=NpgsqlTypes.NpgsqlDbType.Text,Value=(object?)input.PaymentReference??DBNull.Value});
+        cmd.Parameters.Add(new NpgsqlParameter{NpgsqlDbType=NpgsqlTypes.NpgsqlDbType.Bigint,Value=(object?)input.PaidMinor??DBNull.Value});
+        cmd.Parameters.AddWithValue(id);
+        if(await cmd.ExecuteNonQueryAsync()!=1)return Results.Conflict();
+        await Audit(conn,tx,Actor(ctx).Id,"invoice_"+input.Decision,id.ToString());
+        await tx.CommitAsync();
+        return Results.Ok(new {id,state=input.Decision});
+    }
+    catch(PostgresException e) when(e.SqlState is "23505" or "23514")
+    {return Results.Conflict(new {error="Payment amount, reference or decision is not valid."});}
+});
 app.MapPost("/api/customers", async (HttpContext ctx, CustomerInput input) =>
 {
     if (Actor(ctx).Role != "requester") return Results.StatusCode(403);
@@ -363,3 +419,6 @@ internal sealed record DecisionInput(string Decision);
 internal sealed record OperatorLogin(string? Password);
 
 internal sealed record RotationInput(string NewKeyId,string NewPublicKey,bool CustomerTrustStaged);
+
+internal sealed record InvoiceInput(string SubscriptionId,Guid? RenewalJobId,string Currency,long AmountMinor);
+internal sealed record InvoiceDecision(string Decision,string? PaymentReference,long? PaidMinor);

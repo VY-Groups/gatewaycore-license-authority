@@ -21,6 +21,7 @@ foreach (var role in new[] { "gc_portal_requester", "gc_portal_reviewer", "gc_is
 await Exec(admin, File.ReadAllText("tools/LicensePortal/migration-002-authority-rotation.sql"));
 await Exec(admin, File.ReadAllText("tools/LicensePortal/runtime-grants.sql"));
 await Exec(admin, File.ReadAllText("tools/AuthorityRecovery/recovery-grants.sql"));
+await Exec(admin, File.ReadAllText("tools/LicensePortal/migration-003-billing.sql"));
 NpgsqlDataSource Role(string role) => NpgsqlDataSource.Create(new NpgsqlConnectionStringBuilder(cfg.ConnectionString)
     { Username = role, Password = "disposable-ci-" + role }.ConnectionString);
 await using var requester = Role("gc_portal_requester");
@@ -44,6 +45,25 @@ try
         INSERT INTO gc_subscriptions(id,customer_id,deployment_id,edition,max_nodes,max_sites,expires_at,features)
         VALUES('ci-license','ci-customer','ci-deployment','standard',1,1,$1,ARRAY['l7','monitoring'])
         """, now.AddDays(30));
+    async Task<Guid> Invoice(string subscription,Guid? renewal=null)
+    {
+        var id=Guid.NewGuid();
+        if(renewal is Guid job)
+            await Exec(requester,"""
+                INSERT INTO gc_billing_invoices(id,subscription_id,renewal_job_id,terms_hash,currency,amount_minor,requested_by)
+                VALUES($1,$2,$3,public.gc_billing_terms($2,$3),'INR',10000,'alice')
+                """,id,subscription,job);
+        else
+            await Exec(requester,"""
+                INSERT INTO gc_billing_invoices(id,subscription_id,terms_hash,currency,amount_minor,requested_by)
+                VALUES($1,$2,public.gc_billing_terms($2,NULL::uuid),'INR',10000,'alice')
+                """,id,subscription);
+        return id;
+    }
+    Task<int> Pay(Guid id,string reference,long amount=10000)=>Exec(reviewer,"""
+        UPDATE gc_billing_invoices SET state='paid',decided_by='bob',decided_at=now(),payment_reference=$2,paid_minor=$3
+        WHERE id=$1 AND state='pending'
+        """,id,reference,amount);
     async Task<Guid> Request(int index, long terms = 1)
     {
         var bytes = stores[index].ExportActivationRequest();
@@ -75,6 +95,15 @@ try
     await SqlDenied(() => Exec(reviewer,"UPDATE gc_license_jobs SET state='approved',approved_by='alice',approved_at=now() WHERE id=$1",first),"self approval denied");
     Check(await Approve(first)==1 && await Approve(second)==1,"distinct reviewer approvals");
     await SqlDenied(() => Exec(reviewer,"UPDATE gc_license_jobs SET state='rejected',approved_by='bob',approved_at=now() WHERE id=$1",first),"approved job immutable");
+    await Denied(()=>Execute(first),"approved but unpaid commercial issuance denied");
+    var invoice=await Invoice("ci-license");
+    await SqlDenied(()=>Exec(requester,"UPDATE gc_billing_invoices SET state='paid',decided_by='bob',decided_at=now(),payment_reference='forged',paid_minor=10000 WHERE id=$1",invoice),"requester cannot mark invoice paid");
+    await SqlDenied(()=>Exec(issuer,"UPDATE gc_billing_invoices SET state='paid' WHERE id=$1",invoice),"issuer cannot mark invoice paid");
+    await SqlDenied(()=>Pay(invoice,"payment-ci-first",9999),"underpayment denied");
+    await SqlDenied(()=>Exec(reviewer,"UPDATE gc_billing_invoices SET state='paid',decided_by='alice',decided_at=now(),payment_reference='self',paid_minor=10000 WHERE id=$1",invoice),"self settlement denied");
+    await Denied(()=>Execute(first),"pending invoice cannot authorize issuance");
+    Check(await Pay(invoice,"payment-ci-first")==1,"independent exact settlement");
+    await SqlDenied(()=>Exec(reviewer,"UPDATE gc_billing_invoices SET state='void',decided_by='bob',decided_at=now(),payment_reference=NULL,paid_minor=NULL WHERE id=$1",invoice),"paid invoice immutable");
     async Task<(Guid Id,string? Envelope)> Attempt(Guid id)
     {
         try { return (id,await Execute(id)); }
@@ -99,7 +128,15 @@ try
         INSERT INTO gc_license_jobs(id,subscription_id,kind,expected_terms_revision,proposed_terms,requested_by)
         VALUES($1,'ci-license','renew_terms',1,$2::jsonb,'alice')
         """,renewal,JsonSerializer.Serialize(terms));
-    Check(await Approve(renewal)==1 && await Execute(renewal) is null,"approved terms renewal committed");
+    Check(await Approve(renewal)==1,"renewal approved independently");
+    await Denied(()=>Execute(renewal),"prior paid terms do not cover changed renewal");
+    var renewalInvoice=await Invoice("ci-license",renewal);
+    await SqlDenied(()=>Exec(reviewer,"UPDATE gc_billing_invoices SET amount_minor=1 WHERE id=$1",renewalInvoice),"reviewer cannot alter agreed invoice amount");
+    // Duplicate cleared payment references fail atomically.
+    try{await Pay(renewalInvoice,"payment-ci-first");throw new Exception("FAIL: reused payment reference");}
+    catch(PostgresException e) when(e.SqlState=="23505"){Check(true,"payment reference replay denied");}
+    Check(await Pay(renewalInvoice,"payment-ci-renew")==1,"renewal independently settled");
+    Check(await Execute(renewal) is null,"approved paid terms renewal committed");
     await Denied(() => Execute(stale),"stale approved terms cannot issue");
     var next=await Request(winnerIndex,2);
     Check(await Approve(next)==1,"renewal approved");
@@ -185,6 +222,8 @@ try
             INSERT INTO gc_subscriptions(id,customer_id,deployment_id,edition,max_nodes,max_sites,expires_at,features)
             VALUES('interop-license','ci-customer','interop-deployment','standard',1,1,$1,ARRAY['l7','monitoring'])
             """,now.AddDays(30));
+        var independentInvoice=await Invoice("interop-license");
+        Check(await Pay(independentInvoice,"payment-ci-interop")==1,"independent SDK contract paid");
         async Task<string> IssueIndependent(string filename)
         {
             var requestPath=Path.Combine(interop,filename+".gcr");

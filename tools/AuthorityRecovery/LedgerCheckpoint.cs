@@ -14,7 +14,7 @@ public static class LedgerCheckpoint
     [
         ("gc_customers","id"),("gc_subscriptions","id"),("gc_license_jobs","id"),
         ("gc_issuer_authority","subscription_id"),("gc_issuer_allocations","subscription_id,installation_hash"),
-        ("gc_issuer_results","job_id"),("gc_issuer_key_history","subscription_id,key_id"),("gc_portal_audit","id")
+        ("gc_issuer_results","job_id"),("gc_issuer_key_history","subscription_id,key_id"),("gc_billing_invoices","id"),("gc_portal_audit","id")
     ];
     public static async Task<string> Digest(NpgsqlDataSource db)
     {
