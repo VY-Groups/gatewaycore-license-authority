@@ -1,4 +1,5 @@
 using System.Security.Cryptography;
+using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
 using GatewayCore.Licensing;
@@ -152,6 +153,80 @@ try
     await SqlDenied(() => Exec(issuer,"DELETE FROM gc_portal_audit"),"worker cannot erase audit");
     await SqlDenied(() => Exec(requester,"UPDATE gc_portal_audit SET action='edited'"),"portal cannot rewrite audit");
     Check((long)(await Scalar(admin,"SELECT count(*) FROM gc_issuer_results"))! == 6,"only committed successful jobs have results");
+    // Separate actual customer SDK executable, built from pinned other repository.
+    var customerDll=Environment.GetEnvironmentVariable("GC_CUSTOMER_INTEROP_DLL")
+        ?? throw new InvalidOperationException("Independent customer build required.");
+    var interop=root+"-interop";
+    Directory.CreateDirectory(interop);
+    try
+    {
+        var publicTrust=Path.Combine(interop,"public-trust.json");
+        File.WriteAllBytes(publicTrust,JsonSerializer.SerializeToUtf8Bytes(trust));
+        var customerState=Path.Combine(interop,"customer-state");
+        async Task<JsonElement?> Customer(string action,string? file=null,int expected=0)
+        {
+            var info=new ProcessStartInfo("dotnet"){RedirectStandardOutput=true,RedirectStandardError=true,UseShellExecute=false};
+            foreach(var arg in new[]{customerDll,action,customerState,publicTrust})info.ArgumentList.Add(arg);
+            if(file is not null)info.ArgumentList.Add(file);
+            using var process=Process.Start(info)??throw new InvalidOperationException("Could not start customer verifier.");
+            var stdout=process.StandardOutput.ReadToEndAsync();
+            var stderr=process.StandardError.ReadToEndAsync();
+            using var deadline=new CancellationTokenSource(TimeSpan.FromSeconds(45));
+            try{await process.WaitForExitAsync(deadline.Token);}
+            catch(OperationCanceledException){process.Kill(true);throw;}
+            var output=await stdout;var error=await stderr;
+            if(process.ExitCode!=expected)throw new Exception("Independent customer process exit "+process.ExitCode+": "+error);
+            if(string.IsNullOrWhiteSpace(output))return null;
+            using var json=JsonDocument.Parse(output);
+            return json.RootElement.Clone();
+        }
+        await Exec(requester,"""
+            INSERT INTO gc_subscriptions(id,customer_id,deployment_id,edition,max_nodes,max_sites,expires_at,features)
+            VALUES('interop-license','ci-customer','interop-deployment','standard',1,1,$1,ARRAY['l7','monitoring'])
+            """,now.AddDays(30));
+        async Task<string> IssueIndependent(string filename)
+        {
+            var requestPath=Path.Combine(interop,filename+".gcr");
+            await Customer(filename=="first"?"provision":"request",requestPath);
+            var bytes=File.ReadAllBytes(requestPath);
+            var parsed=OfflineActivationRequest.Verify(bytes);
+            var job=Guid.NewGuid();
+            await Exec(requester,"""
+                INSERT INTO gc_license_jobs(id,subscription_id,kind,expected_terms_revision,site_id,request_id,installation_hash,request_file,requested_by)
+                VALUES($1,'interop-license','issue',1,'dc',$2,$3,$4,'alice')
+                """,job,parsed.RequestId,parsed.InstallationKeySha256,Encoding.ASCII.GetString(bytes));
+            Check(await Approve(job)==1,"independent customer request approved");
+            var signed=await ExecuteNew(job)??throw new Exception("Missing independently issued envelope.");
+            var path=Path.Combine(interop,filename+".lic");
+            File.WriteAllText(path,signed,Encoding.ASCII);
+            return path;
+        }
+        var firstPath=await IssueIndependent("first");
+        var independentActive=(await Customer("import",firstPath))!.Value;
+        Check(independentActive.GetProperty("revision").GetInt64()==1 &&
+            independentActive.GetProperty("validity").GetString()=="Active","actual other-repository SDK imports database-signed license");
+        var secondPath=await IssueIndependent("second");
+        var independentRenewed=(await Customer("import",secondPath))!.Value;
+        Check(independentRenewed.GetProperty("revision").GetInt64()==2 &&
+            independentRenewed.GetProperty("allocationId").GetString()==independentActive.GetProperty("allocationId").GetString(),
+            "cross-repository renewal preserves allocation");
+        await Customer("import",firstPath,1);
+        Check((await Customer("inspect"))!.Value.GetProperty("revision").GetInt64()==2,"independent process restart rejects rollback");
+        var revokeJob=Guid.NewGuid();
+        await Exec(requester,"""
+            INSERT INTO gc_license_jobs(id,subscription_id,kind,expected_terms_revision,allocation_id,requested_by)
+            VALUES($1,'interop-license','revoke',1,$2,'alice')
+            """,revokeJob,independentRenewed.GetProperty("allocationId").GetString()!);
+        Check(await Approve(revokeJob)==1,"independent customer revocation approved");
+        var revocationPath=Path.Combine(interop,"revoked.gcv");
+        File.WriteAllText(revocationPath,(await ExecuteNew(revokeJob))!,Encoding.ASCII);
+        Check((await Customer("revoke",revocationPath))!.Value.GetProperty("validity").GetString()=="Revoked",
+            "independent customer imports real database-signed revocation");
+        Check((await Customer("inspect"))!.Value.GetProperty("validity").GetString()=="Revoked","revocation persists in separate customer process");
+        await Customer("import",secondPath,1);
+        Console.WriteLine("CROSS_REPOSITORY_OFFLINE_INTEROP_PASS");
+    }
+    finally{Directory.Delete(interop,true);}
     Console.WriteLine("POSTGRES_AUTHORITY_ACCEPTANCE_PASS");
 }
 finally

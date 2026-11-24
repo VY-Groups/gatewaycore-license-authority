@@ -44,9 +44,17 @@ jobs:
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '10.0.x'
+      - uses: actions/checkout@v4
+        with:
+          repository: VY-Groups/yarp-lb
+          ref: 58f55b98b253c023d0ec824f17e001c9677c1929
+          path: customer-contract
+          persist-credentials: false
+      - run: dotnet build tests/CustomerInterop/CustomerInterop.csproj --configuration Release
       - run: dotnet run --project tests/PostgresAcceptance/PostgresAcceptance.csproj --configuration Release
         env:
           GC_PG_TEST: Host=127.0.0.1;Port=5432;Database=gatewaycore_ci;Username=postgres;Password=disposable-ci-admin
+          GC_CUSTOMER_INTEROP_DLL: ${{ github.workspace }}/tests/CustomerInterop/bin/Release/net10.0/CustomerInterop.dll
       - run: dotnet build tools/LicensePortal/LicensePortal.csproj --configuration Release
       - run: python3 tests/PortalAcceptance/https_mfa.py
   customer-protocol-snapshot:
@@ -56,7 +64,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: VY-Groups/yarp-lb
-          ref: dfe1ed48056f4da543ba1e95f57e64046b5932a8
+          ref: 58f55b98b253c023d0ec824f17e001c9677c1929
           path: customer-contract
           persist-credentials: false
       - name: Verify exact shared protocol snapshot
