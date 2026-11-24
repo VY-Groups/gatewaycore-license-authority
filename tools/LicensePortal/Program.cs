@@ -13,18 +13,25 @@ if (args.Length == 1 && args[0] == "--hash-password")
 }
 var builder = WebApplication.CreateBuilder(args);
 var config = builder.Configuration;
+// One role and one database credential per deployment. Never load the other
+// portal's secret, even when supplied through legacy configuration.
+var deploymentRole = config["Portal:Role"];
+if (deploymentRole is not ("requester" or "reviewer"))
+    throw new InvalidOperationException("Portal:Role must select exactly one operator role.");
+if (!string.IsNullOrEmpty(config.GetConnectionString("LicensingReviewer")) ||
+    !string.IsNullOrEmpty(config.GetConnectionString("LicensingRequester")))
+    throw new InvalidOperationException("Mixed/legacy portal database credentials forbidden.");
 var pinPath = config["Portal:OperatorPins"] ?? throw new InvalidOperationException("Operator certificate pins required.");
 var pinInfo = new FileInfo(pinPath);
 if (pinInfo.Length is < 1 or > 32768) throw new InvalidDataException("Invalid operator pin configuration size.");
 var operators = JsonSerializer.Deserialize<Dictionary<string, PortalOperator>>(File.ReadAllBytes(pinPath),
     new JsonSerializerOptions { PropertyNameCaseInsensitive = true })
     ?? throw new InvalidDataException("Missing operator identities.");
-if (operators.Count is < 2 or > 100 ||
+if (operators.Count is < 1 or > 100 ||
     operators.Any(x => x.Key.Length != 64 || x.Key.Any(c => c is not (>= '0' and <= '9' or >= 'A' and <= 'F')) ||
-        !Id(x.Value.Id) || x.Value.Role is not ("requester" or "reviewer")) ||
-    operators.Values.Select(x => x.Id).Distinct(StringComparer.Ordinal).Count() != operators.Count ||
-    !operators.Values.Any(x => x.Role == "requester") || !operators.Values.Any(x => x.Role == "reviewer"))
-    throw new InvalidDataException("Require distinct pinned operator identities and roles.");
+        !Id(x.Value.Id) || x.Value.Role != deploymentRole) ||
+    operators.Values.Select(x => x.Id).Distinct(StringComparer.Ordinal).Count() != operators.Count)
+    throw new InvalidDataException("Only distinct identities for the configured portal role are permitted.");
 var sessions = new OperatorPasswordSessions(config["Portal:PasswordHashes"] ??
     throw new InvalidOperationException("Operator password hash file required."), operators.Values);
 
@@ -49,13 +56,30 @@ builder.WebHost.ConfigureKestrel(k =>
     });
 });
 var db = NpgsqlDataSource.Create(config.GetConnectionString("Licensing") ??
-    throw new InvalidOperationException("Licensing database required."));
-// Separate database credentials constrain the requester and reviewer SQL surfaces.
-// Both are in the portal process; a compromised process is not a dual-control boundary.
-var reviewerDb = NpgsqlDataSource.Create(config.GetConnectionString("LicensingReviewer") ??
-    throw new InvalidOperationException("Reviewer database required."));
+    throw new InvalidOperationException("Single role-specific licensing database required."));
+// Refuse to listen if the actual database principal has the wrong privileges.
+// Prevent accidentally deploying a reviewer credential to a requester process.
+await using (var conn = await db.OpenConnectionAsync())
+await using (var check = new NpgsqlCommand("""
+    SELECT current_user::text, session_user::text,
+      has_column_privilege(current_user,'public.gc_license_jobs','state','UPDATE'),
+      has_column_privilege(current_user,'public.gc_license_jobs','requested_by','INSERT'),
+      pg_has_role(current_user,'gc_issuer_runtime','MEMBER'),
+      pg_has_role(current_user,'gc_portal_requester','MEMBER'),
+      pg_has_role(current_user,'gc_portal_reviewer','MEMBER'),
+      (SELECT rolsuper OR rolcreaterole OR rolcreatedb OR rolreplication OR rolbypassrls
+       FROM pg_roles WHERE rolname=current_user)
+    """,conn))
+await using (var row = await check.ExecuteReaderAsync())
+{
+    var expected = deploymentRole == "requester" ? "gc_portal_requester" : "gc_portal_reviewer";
+    var reviewing = deploymentRole == "reviewer";
+    if (!await row.ReadAsync() || row.GetString(0) != expected || row.GetString(1) != expected ||
+        row.GetBoolean(2) != reviewing || row.GetBoolean(3) == reviewing ||
+        row.GetBoolean(4) || row.GetBoolean(5) == reviewing || row.GetBoolean(6) != reviewing || row.GetBoolean(7))
+        throw new InvalidOperationException("Database principal does not match isolated portal role.");
+}
 builder.Services.AddSingleton(db);
-builder.Services.AddKeyedSingleton("reviewer", reviewerDb);
 var app = builder.Build();
 var expectedOrigin = new Uri(config["Portal:Origin"] ?? throw new InvalidOperationException("HTTPS portal origin required."));
 if (expectedOrigin.Scheme != "https" || expectedOrigin.AbsolutePath != "/" ||
@@ -269,7 +293,7 @@ app.MapPost("/api/jobs/{id:guid}/decision", async (HttpContext ctx, Guid id, Dec
     var actor = Actor(ctx);
     if (actor.Role != "reviewer") return Results.StatusCode(403);
     if (input.Decision is not ("approved" or "rejected")) return Results.BadRequest();
-    await using var conn = await reviewerDb.OpenConnectionAsync();
+    await using var conn = await db.OpenConnectionAsync();
     await using var tx = await conn.BeginTransactionAsync();
     await using var cmd = new NpgsqlCommand("""
         UPDATE gc_license_jobs SET state=$1, approved_by=$2, approved_at=now()

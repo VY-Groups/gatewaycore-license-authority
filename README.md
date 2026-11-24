@@ -22,3 +22,6 @@ Development only. Pending: real PostgreSQL concurrent issuance/approval acceptan
 
 ## Independent commercial release signing
 The customer release profile pins independent public release trust and exact source commit. Build the customer package with that public trust, independently review the clean immutable staging directory, then run `dotnet run --project tools/ReleaseManifestSigner -- PACKAGE SOURCE_COMMIT RELEASE_KEY_ID ENCRYPTED_KEY_PEM` interactively on the company signing host. Use a distinct release key from license entitlements, stored outside Git and outside the package. The tool refuses to overwrite existing manifests, rejects linked paths and obvious secret file types, signs the bounded full inventory, and re-verifies it with the customer-compatible SDK before returning success. Keep staging storage private and immutable during signing. This is not an external trusted timestamp, OS signing, or production release authorization.
+
+## Required dual-control deployment
+The portal is deployed twice, each instance using one operator role and one DB principal. See tools/LicensePortal/README.md and deploy/gc-license-portal@.service. Never deploy both portal secrets to a shared process or account.

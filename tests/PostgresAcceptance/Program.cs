@@ -17,11 +17,11 @@ if (cfg.Host != "127.0.0.1" || cfg.Database != "gatewaycore_ci" || cfg.Username 
 await using var admin = NpgsqlDataSource.Create(cfg.ConnectionString);
 await Exec(admin, File.ReadAllText("tools/LicensePortal/schema.sql"));
 foreach (var role in new[] { "gc_portal_requester", "gc_portal_reviewer", "gc_issuer_runtime" })
-    await Exec(admin, $"CREATE ROLE {role} LOGIN PASSWORD 'disposable-ci-runtime' NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT");
+    await Exec(admin, $"CREATE ROLE {role} LOGIN PASSWORD 'disposable-ci-{role}' NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT");
 await Exec(admin, File.ReadAllText("tools/LicensePortal/migration-002-authority-rotation.sql"));
 await Exec(admin, File.ReadAllText("tools/LicensePortal/runtime-grants.sql"));
 NpgsqlDataSource Role(string role) => NpgsqlDataSource.Create(new NpgsqlConnectionStringBuilder(cfg.ConnectionString)
-    { Username = role, Password = "disposable-ci-runtime" }.ConnectionString);
+    { Username = role, Password = "disposable-ci-" + role }.ConnectionString);
 await using var requester = Role("gc_portal_requester");
 await using var reviewer = Role("gc_portal_reviewer");
 await using var issuer = Role("gc_issuer_runtime");
