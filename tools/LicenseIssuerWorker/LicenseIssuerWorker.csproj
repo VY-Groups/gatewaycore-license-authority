@@ -8,6 +8,7 @@
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="Npgsql" Version="10.0.4" />
-    <ProjectReference Include="../LicenseAuthority/LicenseAuthority.csproj" />
+    <ProjectReference Include="../AuthorityContracts/AuthorityContracts.csproj" />
+    <ProjectReference Include="../../src/GatewayCore.Licensing/GatewayCore.Licensing.csproj" />
   </ItemGroup>
 </Project>

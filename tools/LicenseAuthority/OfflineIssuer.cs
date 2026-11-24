@@ -6,8 +6,6 @@ using GatewayCore.Licensing;
 namespace GatewayCore.LicenseAuthority;
 
 // Operator-approved terms. The customer request never supplies these.
-public sealed record Subscription(string LicenseId, string CustomerId, string DeploymentId,
-    string Edition, int MaxNodes, int MaxSites, long ExpiresAt, string[] Features);
 public sealed record Allocation(string AllocationId, string SiteId, string InstallationKeySha256, long Revision, string? RevocationEnvelope = null);
 public sealed record IssuedRequest(string RequestId, string RequestSha256, string SiteId, string Envelope);
 public sealed record IssuerLedger(Subscription Terms, string KeySha256, string KeyId,

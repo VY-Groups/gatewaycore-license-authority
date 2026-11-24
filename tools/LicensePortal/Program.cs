@@ -286,7 +286,8 @@ app.MapPost("/api/jobs", async (HttpContext ctx, JobInput input) =>
 app.MapPost("/api/subscriptions/{id}/renew", async (HttpContext ctx, string id, Subscription input) =>
 {
     if (Actor(ctx).Role != "requester") return Results.StatusCode(403);
-    if (id != input.LicenseId || !ValidTerms(input)) return Results.BadRequest();
+    if (id != input.LicenseId || !ValidTerms(input) || input.Edition=="evaluation")
+        return Results.BadRequest(new {error="Renewal must select paid commercial terms; free trials cannot be extended or recreated."});
     var job = Guid.NewGuid();
     await using var conn = await db.OpenConnectionAsync();
     await using var tx = await conn.BeginTransactionAsync();
@@ -389,7 +390,8 @@ static bool ValidTerms(Subscription s)
         s.MaxNodes is >= 1 and <= 10000 && s.MaxSites >= 1 && s.MaxSites <= s.MaxNodes &&
         s.ExpiresAt > DateTimeOffset.UtcNow.ToUnixTimeSeconds() && s.ExpiresAt <= 4102444800L &&
         s.Features is { Length: >= 1 and <= 12 } && s.Features.Distinct(StringComparer.Ordinal).Count() == s.Features.Length &&
-        s.Features.All(x => allowed.Contains(x, StringComparer.Ordinal));
+        s.Features.All(x => allowed.Contains(x, StringComparer.Ordinal)) &&
+        EvaluationPolicy.Valid(s,DateTimeOffset.UtcNow);
 }
 static async Task Audit(NpgsqlConnection conn, NpgsqlTransaction tx, string actor, string action, string subject)
 {

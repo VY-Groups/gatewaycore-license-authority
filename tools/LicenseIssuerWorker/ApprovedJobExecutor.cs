@@ -73,7 +73,12 @@ public sealed class ApprovedJobExecutor(NpgsqlDataSource db, ECDsa signer, strin
                 """,id,digest) is not true)
                 throw new InvalidOperationException("Exact commercial subscription terms require independently confirmed payment.");
         }
-        if(kind=="issue")await RequireSettlement(null,terms.Edition);
+        if(kind=="issue")
+        {
+            if(!EvaluationPolicy.Valid(terms,now))
+                throw new InvalidOperationException("Evaluation terms exceed the fixed trial policy.");
+            await RequireSettlement(null,terms.Edition);
+        }
         if (kind != "rotate_authority" && (nextSigner is not null || nextKeyId is not null))
             throw new InvalidOperationException("Second signing key is only permitted for rotation.");
         // Rotation requires an already established authority, not an implicit first signer.
@@ -114,6 +119,24 @@ public sealed class ApprovedJobExecutor(NpgsqlDataSource db, ECDsa signer, strin
             if(request.RequestId!=(string?)job[5] || request.InstallationKeySha256!=(string?)job[6])
                 throw new CryptographicException("Approved request identity mismatch.");
             var site=(string)job[2]!;
+            if(terms.Edition=="evaluation")
+            {
+                var digest=await Scalar("SELECT public.gc_billing_terms($1,NULL::uuid)",id) as string
+                    ??throw new InvalidOperationException("Missing trial contract fingerprint.");
+                // Customer primary key serializes claims across subscriptions.
+                // Claim and signed result commit together or roll back.
+                await Change("""
+                    INSERT INTO public.gc_evaluation_claims(customer_id,subscription_id,installation_hash,terms_hash,claimed_utc,expires_utc)
+                    VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(customer_id) DO NOTHING
+                    """,terms.CustomerId,id,request.InstallationKeySha256,digest,now.ToUnixTimeSeconds(),terms.ExpiresAt);
+                var claim=await Row("""
+                    SELECT subscription_id,installation_hash,terms_hash,expires_utc
+                    FROM public.gc_evaluation_claims WHERE customer_id=$1
+                    """,terms.CustomerId);
+                if(claim is null || (string?)claim[0]!=id || (string?)claim[1]!=request.InstallationKeySha256 ||
+                    (string?)claim[2]!=digest || (long)claim[3]! !=terms.ExpiresAt)
+                    throw new InvalidOperationException("Customer already consumed its immutable evaluation claim.");
+            }
             var old=await Row("""
                 SELECT allocation_id,site_id,revision,revocation_envelope
                 FROM gc_issuer_allocations WHERE subscription_id=$1 AND installation_hash=$2
@@ -165,6 +188,8 @@ public sealed class ApprovedJobExecutor(NpgsqlDataSource db, ECDsa signer, strin
         else if(kind=="renew_terms")
         {
             var next=JsonSerializer.Deserialize<Subscription>((string)job[8]!)??throw new InvalidDataException("Missing approved terms.");
+            if(next.Edition=="evaluation")
+                throw new InvalidOperationException("Evaluation renewal or commercial downgrade to free trial forbidden.");
             var seats=(long)(await Scalar("SELECT count(*) FROM gc_issuer_allocations WHERE subscription_id=$1",id))!;
             var sites=(long)(await Scalar("SELECT count(DISTINCT site_id) FROM gc_issuer_allocations WHERE subscription_id=$1",id))!;
             if(next.LicenseId!=id || next.CustomerId!=terms.CustomerId || next.DeploymentId!=terms.DeploymentId ||

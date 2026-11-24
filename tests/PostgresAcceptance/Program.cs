@@ -22,6 +22,7 @@ await Exec(admin, File.ReadAllText("tools/LicensePortal/migration-002-authority-
 await Exec(admin, File.ReadAllText("tools/LicensePortal/runtime-grants.sql"));
 await Exec(admin, File.ReadAllText("tools/AuthorityRecovery/recovery-grants.sql"));
 await Exec(admin, File.ReadAllText("tools/LicensePortal/migration-003-billing.sql"));
+await Exec(admin, File.ReadAllText("tools/LicensePortal/migration-004-evaluation.sql"));
 NpgsqlDataSource Role(string role) => NpgsqlDataSource.Create(new NpgsqlConnectionStringBuilder(cfg.ConnectionString)
     { Username = role, Password = "disposable-ci-" + role }.ConnectionString);
 await using var requester = Role("gc_portal_requester");
@@ -322,6 +323,84 @@ try
         Console.WriteLine("DATABASE_SITE_BOUND_FLEET_ACCEPTANCE_PASS");
     }
     finally{foreach(var d in fleetDirs)if(Directory.Exists(d))Directory.Delete(d,true);}
+    var evalDirs=Enumerable.Range(0,4).Select(i=>root+"-eval-"+i).ToArray();
+    try
+    {
+        var trialStores=evalDirs.Select(d=>new OfflineLicenseStore(d,verifier)).ToArray();
+        foreach(var node in trialStores)node.Initialize();
+        await Exec(requester,"INSERT INTO gc_customers(id,name) VALUES('trial-ci','Synthetic Evaluation')");
+        async Task AddTrial(string id,int nodes,int days,string[] features)
+        {
+            await Exec(requester,"""
+                INSERT INTO gc_subscriptions(id,customer_id,deployment_id,edition,max_nodes,max_sites,expires_at,features)
+                VALUES($1,'trial-ci',$2,'evaluation',$3,1,$4,$5)
+                """,id,id+"-deployment",nodes,now.AddDays(days),features);
+        }
+        await AddTrial("trial-a",1,14,new[]{"l7","tls"});
+        await AddTrial("trial-b",1,14,new[]{"l7","tls"});
+        await AddTrial("trial-too-long",1,31,new[]{"l7"});
+        await AddTrial("trial-premium",2,14,new[]{"l7","ha","fleet"});
+        async Task<Guid> TrialRequest(string id,int index,long terms=1)
+        {
+            var bytes=trialStores[index].ExportActivationRequest();
+            var parsed=OfflineActivationRequest.Verify(bytes);
+            var job=Guid.NewGuid();
+            await Exec(requester,"""
+                INSERT INTO gc_license_jobs(id,subscription_id,kind,expected_terms_revision,site_id,request_id,installation_hash,request_file,requested_by)
+                VALUES($1,$2,'issue',$3,'dc',$4,$5,$6,'alice')
+                """,job,id,terms,parsed.RequestId,parsed.InstallationKeySha256,Encoding.ASCII.GetString(bytes));
+            Check(await Approve(job)==1,"trial independently approved");
+            return job;
+        }
+        var tooLong=await TrialRequest("trial-too-long",2);
+        var premium=await TrialRequest("trial-premium",3);
+        await Denied(()=>Execute(tooLong),"overlong trial denied");
+        await Denied(()=>Execute(premium),"premium multi-node trial denied");
+        var trialA=await TrialRequest("trial-a",0);
+        var trialB=await TrialRequest("trial-b",1);
+        var trialRace=await Task.WhenAll(Attempt(trialA),Attempt(trialB));
+        Check(trialRace.Count(x=>x.Envelope is not null)==1,"one free trial across concurrent subscriptions for one customer");
+        var trialWinner=trialRace.Single(x=>x.Envelope is not null);
+        var index=trialWinner.Id==trialA?0:1;
+        var subscription=index==0?"trial-a":"trial-b";
+        var trial=trialStores[index].Import(Encoding.ASCII.GetBytes(trialWinner.Envelope!),now);
+        Check(trial.Edition=="evaluation" && trial.MaxNodes==1 && trial.ExpiresAt.ToUnixTimeSeconds()==now.AddDays(14).ToUnixTimeSeconds(),
+            "fixed one-node unpaid evaluation activated");
+        var repeatJob=await TrialRequest(subscription,index);
+        var repeatTrial=trialStores[index].Import(Encoding.ASCII.GetBytes((await Execute(repeatJob))!),now);
+        Check(repeatTrial.Revision==2 && repeatTrial.ExpiresAt==trial.ExpiresAt && repeatTrial.AllocationId==trial.AllocationId,
+            "same trial identity may recover envelope without extending term");
+        await SqlDenied(()=>Exec(issuer,"DELETE FROM gc_evaluation_claims WHERE customer_id='trial-ci'"),"issuer cannot reset consumed trial");
+        await SqlDenied(()=>Exec(requester,"UPDATE gc_evaluation_claims SET expires_utc=expires_utc+1 WHERE customer_id='trial-ci'"),"portal cannot extend consumed trial");
+        async Task<Guid> TermsJob(string edition,int days,long revision)
+        {
+            var job=Guid.NewGuid();
+            var next=new Subscription(subscription,"trial-ci",subscription+"-deployment",edition,1,1,now.AddDays(days).ToUnixTimeSeconds(),new[]{"l7","tls"});
+            await Exec(requester,"""
+                INSERT INTO gc_license_jobs(id,subscription_id,kind,expected_terms_revision,proposed_terms,requested_by)
+                VALUES($1,$2,'renew_terms',$3,$4::jsonb,'alice')
+                """,job,subscription,revision,JsonSerializer.Serialize(next));
+            Check(await Approve(job)==1,"trial lifecycle terms independently approved");
+            return job;
+        }
+        var extension=await TermsJob("evaluation",25,1);
+        await Denied(()=>Execute(extension),"free trial cannot renew");
+        var upgrade=await TermsJob("standard",60,1);
+        await Denied(()=>Execute(upgrade),"trial conversion requires paid exact terms");
+        var conversionInvoice=await Invoice(subscription,upgrade);
+        Check(await Pay(conversionInvoice,"payment-ci-trial-upgrade")==1,"commercial conversion settled");
+        Check(await Execute(upgrade) is null,"paid conversion terms committed");
+        var paidJob=await TrialRequest(subscription,index,2);
+        var paid=trialStores[index].Import(Encoding.ASCII.GetBytes((await Execute(paidJob))!),now);
+        Check(paid.Edition=="standard" && paid.Revision==3 && paid.AllocationId==trial.AllocationId,"paid conversion retains installation allocation");
+        var freeAgain=await TermsJob("evaluation",20,2);
+        await Denied(()=>Execute(freeAgain),"paid subscription cannot downgrade to evaluation");
+        await Denied(()=>Execute(index==0?trialB:trialA),"prior losing subscription still cannot receive free trial after upgrade");
+        Check((long)(await Scalar(admin,"SELECT count(*) FROM gc_evaluation_claims WHERE customer_id='trial-ci'"))! == 1,
+            "evaluation claim survives paid conversion");
+        Console.WriteLine("EVALUATION_LIFECYCLE_ACCEPTANCE_PASS");
+    }
+    finally{foreach(var d in evalDirs)if(Directory.Exists(d))Directory.Delete(d,true);}
     await RecoveryAcceptance.Run(cfg,admin,nextSigningKey,revoke,revoked,replacement,retry);
     Console.WriteLine("POSTGRES_AUTHORITY_ACCEPTANCE_PASS");
 }

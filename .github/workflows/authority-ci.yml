@@ -3,7 +3,7 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main, feature/authority-bootstrap, feature/authority-recovery, feature/authority-billing]
+    branches: [main, feature/authority-bootstrap, feature/authority-recovery, feature/authority-billing, feature/authority-site-bound]
 permissions:
   contents: read
 jobs:
@@ -63,6 +63,17 @@ jobs:
           GC_PG_TEST: Host=127.0.0.1;Port=5432;Database=gatewaycore_ci;Username=postgres;Password=disposable-ci-admin
           GC_CUSTOMER_INTEROP_DLL: ${{ github.workspace }}/tests/CustomerInterop/bin/Release/net10.0/CustomerInterop.dll
       - run: dotnet build tools/LicensePortal/LicensePortal.csproj --configuration Release
+      - name: Verify operator portal contains no legacy signing assembly
+        run: |
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          output=Path("tools/LicensePortal/bin/Release/net10.0")
+          libraries=json.loads((output/"LicensePortal.deps.json").read_text())["libraries"]
+          assert not any(name.startswith("LicenseAuthority/") for name in libraries), libraries.keys()
+          assert not (output/"LicenseAuthority.dll").exists()
+          assert not (output/"LicenseIssuerWorker.dll").exists()
+          PY
       - run: python3 tests/PortalAcceptance/https_mfa.py
   customer-protocol-snapshot:
     runs-on: ubuntu-24.04
