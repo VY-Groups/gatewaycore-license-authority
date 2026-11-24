@@ -223,6 +223,38 @@ app.MapPost("/api/subscriptions/{id}/renew", async (HttpContext ctx, string id, 
     await tx.CommitAsync();
     return Results.Ok(new {id=job});
 });
+app.MapPost("/api/subscriptions/{id}/rotate-authority", async (HttpContext ctx, string id, RotationInput input) =>
+{
+    if (Actor(ctx).Role != "requester") return Results.StatusCode(403);
+    if (!Id(id) || !Id(input.NewKeyId) || !input.CustomerTrustStaged || input.NewPublicKey is not { Length: >= 1 and <= 512 })
+        return Results.BadRequest(new { error = "New public key and customer trust rollout acknowledgement required." });
+    string fingerprint;
+    try
+    {
+        var spki=Convert.FromBase64String(input.NewPublicKey);
+        using var next=ECDsa.Create();
+        next.ImportSubjectPublicKeyInfo(spki,out var read);
+        if(read!=spki.Length || next.ExportParameters(false).Curve.Oid.Value!="1.2.840.10045.3.1.7")
+            throw new CryptographicException("Invalid P-256 key.");
+        fingerprint=Convert.ToHexString(SHA256.HashData(next.ExportSubjectPublicKeyInfo()));
+    }
+    catch(Exception e) when(e is CryptographicException or ArgumentException or FormatException)
+    { return Results.BadRequest(new { error = "Invalid release-staged entitlement public key." }); }
+    var payload=JsonSerializer.Serialize(new { input.NewKeyId, NewPublicKeySha256=fingerprint, input.CustomerTrustStaged });
+    var job=Guid.NewGuid();
+    await using var conn=await db.OpenConnectionAsync();
+    await using var tx=await conn.BeginTransactionAsync();
+    await using var cmd=new NpgsqlCommand("""
+        INSERT INTO gc_license_jobs(id,subscription_id,kind,requested_by,expected_terms_revision,proposed_terms)
+        SELECT $1,id,'rotate_authority',$2,terms_revision,$3::jsonb FROM gc_subscriptions WHERE id=$4
+        """,conn,tx);
+    cmd.Parameters.AddWithValue(job);cmd.Parameters.AddWithValue(Actor(ctx).Id);
+    cmd.Parameters.AddWithValue(payload);cmd.Parameters.AddWithValue(id);
+    if(await cmd.ExecuteNonQueryAsync()!=1)return Results.NotFound();
+    await Audit(conn,tx,Actor(ctx).Id,"authority_rotation_requested",job.ToString());
+    await tx.CommitAsync();
+    return Results.Ok(new {id=job,newPublicKeySha256=fingerprint});
+});
 app.MapGet("/api/jobs/{id:guid}/result", async (Guid id) =>
 {
     await using var conn = await db.OpenConnectionAsync();
@@ -305,3 +337,5 @@ internal sealed record JobInput(string SubscriptionId, string Kind, string? Site
 internal sealed record DecisionInput(string Decision);
 
 internal sealed record OperatorLogin(string? Password);
+
+internal sealed record RotationInput(string NewKeyId,string NewPublicKey,bool CustomerTrustStaged);

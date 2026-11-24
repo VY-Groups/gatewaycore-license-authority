@@ -12,7 +12,7 @@ namespace GatewayCore.LicenseIssuerWorker;
 // No private key or issuance capability belongs in the operator web process.
 public sealed class ApprovedJobExecutor(NpgsqlDataSource db, ECDsa signer, string keyId)
 {
-    public async Task<string?> Execute(Guid jobId, DateTimeOffset now)
+    public async Task<string?> Execute(Guid jobId, DateTimeOffset now, ECDsa? nextSigner = null, string? nextKeyId = null)
     {
         var pub = signer.ExportSubjectPublicKeyInfo();
         var verifier = new OfflineLicenseVerifier(new Dictionary<string, byte[]> { [keyId] = pub });
@@ -58,15 +58,39 @@ public sealed class ApprovedJobExecutor(NpgsqlDataSource db, ECDsa signer, strin
         if((long)sub[7]! != (long)job[7]!) throw new InvalidOperationException("Subscription changed; request new approval.");
         var terms=new Subscription(id,(string)sub[0]!, (string)sub[1]!, (string)sub[2]!,
             (int)sub[3]!, (int)sub[4]!, (long)sub[5]!, (string[])sub[6]!);
-        // Existing allocations cannot silently switch to another signer.
-        await Change("INSERT INTO gc_issuer_authority(subscription_id,key_id,public_key_hash) VALUES($1,$2,$3) ON CONFLICT DO NOTHING",id,keyId,keyHash);
+        var kind=(string)job[1]!;
+        if (kind != "rotate_authority" && (nextSigner is not null || nextKeyId is not null))
+            throw new InvalidOperationException("Second signing key is only permitted for rotation.");
+        // Rotation requires an already established authority, not an implicit first signer.
+        if (kind != "rotate_authority")
+            await Change("INSERT INTO gc_issuer_authority(subscription_id,key_id,public_key_hash) VALUES($1,$2,$3) ON CONFLICT DO NOTHING",id,keyId,keyHash);
         var authority=await Row("SELECT key_id,public_key_hash FROM gc_issuer_authority WHERE subscription_id=$1",id);
         if(authority is null || (string?)authority[0]!=keyId || (string?)authority[1]!=keyHash)
             throw new CryptographicException("Issuer authority mismatch; approved rotation required.");
 
         string? result=null;
-        var kind=(string)job[1]!;
-        if(kind=="issue")
+        if(kind=="rotate_authority")
+        {
+            var approval=JsonSerializer.Deserialize<RotationApproval>((string)job[8]!)
+                ?? throw new InvalidDataException("Missing approved rotation.");
+            if(nextSigner is null || nextKeyId is null || !approval.CustomerTrustStaged ||
+                nextKeyId!=approval.NewKeyId || nextKeyId==keyId)
+                throw new InvalidOperationException("Rotation requires approved new key and staged customer trust.");
+            var nextPub=nextSigner.ExportSubjectPublicKeyInfo();
+            _=new OfflineLicenseVerifier(new Dictionary<string,byte[]> { [nextKeyId]=nextPub });
+            var nextHash=Convert.ToHexString(SHA256.HashData(nextPub));
+            if(nextHash!=approval.NewPublicKeySha256 || nextHash==keyHash)
+                throw new CryptographicException("New signing key does not match approved fingerprint.");
+            var challenge=Encoding.ASCII.GetBytes("GCR-ROTATE:"+jobId.ToString("N")+":"+keyHash+":"+nextHash);
+            foreach(var signing in new[]{signer,nextSigner})
+            {
+                var proof=signing.SignData(challenge,HashAlgorithmName.SHA256);
+                if(!signing.VerifyData(challenge,proof,HashAlgorithmName.SHA256))
+                    throw new CryptographicException("Private signing key possession required.");
+            }
+            await Scalar("SELECT public.gc_rotate_authority($1,$2,$3,$4,$5)",jobId,keyId,keyHash,nextKeyId,nextHash);
+        }
+        else if(kind=="issue")
         {
             if(job[3] is not string requestFile || requestFile.Length>4096 ||
                 requestFile.Any(c=>c is < (char)33 or > (char)126))
@@ -160,3 +184,5 @@ public sealed class ApprovedJobExecutor(NpgsqlDataSource db, ECDsa signer, strin
             DSASignatureFormat.IeeeP1363FixedFieldConcatenation));
     }
 }
+
+public sealed record RotationApproval(string NewKeyId,string NewPublicKeySha256,bool CustomerTrustStaged);

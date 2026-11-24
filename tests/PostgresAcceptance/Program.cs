@@ -17,6 +17,7 @@ await using var admin = NpgsqlDataSource.Create(cfg.ConnectionString);
 await Exec(admin, File.ReadAllText("tools/LicensePortal/schema.sql"));
 foreach (var role in new[] { "gc_portal_requester", "gc_portal_reviewer", "gc_issuer_runtime" })
     await Exec(admin, $"CREATE ROLE {role} LOGIN PASSWORD 'disposable-ci-runtime' NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT");
+await Exec(admin, File.ReadAllText("tools/LicensePortal/migration-002-authority-rotation.sql"));
 await Exec(admin, File.ReadAllText("tools/LicensePortal/runtime-grants.sql"));
 NpgsqlDataSource Role(string role) => NpgsqlDataSource.Create(new NpgsqlConnectionStringBuilder(cfg.ConnectionString)
     { Username = role, Password = "disposable-ci-runtime" }.ConnectionString);
@@ -26,7 +27,9 @@ await using var issuer = Role("gc_issuer_runtime");
 var now = DateTimeOffset.UtcNow;
 using var signingKey = ECDsa.Create(ECCurve.NamedCurves.nistP256);
 var key = signingKey.ExportPkcs8PrivateKey();
-var trust = new Dictionary<string,byte[]> { ["test-pg"] = signingKey.ExportSubjectPublicKeyInfo() };
+using var nextSigningKey=ECDsa.Create(ECCurve.NamedCurves.nistP256);
+var trust = new Dictionary<string,byte[]> { ["test-pg"] = signingKey.ExportSubjectPublicKeyInfo(),
+    ["test-pg-next"]=nextSigningKey.ExportSubjectPublicKeyInfo() };
 var verifier = new OfflineLicenseVerifier(trust);
 var root = Path.Combine(Path.GetTempPath(), "gc-pg-" + Guid.NewGuid().ToString("N"));
 var dirs = Enumerable.Range(0,4).Select(i => root + "-" + i).ToArray();
@@ -100,24 +103,55 @@ try
     Check(await Approve(next)==1,"renewal approved");
     var updated=stores[winnerIndex].Import(Encoding.ASCII.GetBytes((await Execute(next))!),now);
     Check(updated.Revision==2 && !updated.Allows("l7") && updated.Allows("monitoring"),"signed feature downgrade advances revision");
+    var rotation=Guid.NewGuid();
+    var approvedHash=Convert.ToHexString(SHA256.HashData(nextSigningKey.ExportSubjectPublicKeyInfo()));
+    var rotationPayload=new RotationApproval("test-pg-next",approvedHash,true);
+    await Exec(requester,"""
+        INSERT INTO gc_license_jobs(id,subscription_id,kind,expected_terms_revision,proposed_terms,requested_by)
+        VALUES($1,'ci-license','rotate_authority',2,$2::jsonb,'alice')
+        """,rotation,JsonSerializer.Serialize(rotationPayload));
+    Task<string?> Rotate(ECDsa nextKey)=>new ApprovedJobExecutor(issuer,signingKey,"test-pg").Execute(rotation,now,nextKey,"test-pg-next");
+    await Denied(()=>Rotate(nextSigningKey),"unapproved authority rotation denied");
+    Check(await Approve(rotation)==1,"rotation independently approved");
+    await Denied(()=>Execute(rotation),"rotation without both keys denied");
+    using(var wrong=ECDsa.Create(ECCurve.NamedCurves.nistP256))
+    {
+        try { await Rotate(wrong);throw new Exception("FAIL: wrong rotation key accepted"); }
+        catch(CryptographicException){Check(true,"wrong replacement key denied");}
+    }
+    await SqlDenied(()=>Exec(issuer,"UPDATE gc_issuer_authority SET key_id='unapproved' WHERE subscription_id='ci-license'"),"direct authority mutation denied");
+    Check(await Rotate(nextSigningKey) is null,"approved key rotation committed");
+    Check(await Rotate(nextSigningKey) is null,"rotation replay idempotent");
+    Check((long)(await Scalar(admin,"SELECT count(*) FROM gc_issuer_key_history"))! == 2,"both authority fingerprints recorded");
+    var nextJob=await Request(winnerIndex,3);
+    Check(await Approve(nextJob)==1,"post-rotation issuance approved");
+    try { await Execute(nextJob);throw new Exception("FAIL: old signing key still accepted"); }
+    catch(CryptographicException){Check(true,"old signer cannot issue after rotation");}
+    Task<string?> ExecuteNew(Guid job)=>new ApprovedJobExecutor(issuer,nextSigningKey,"test-pg-next").Execute(job,now);
+    var rotatedBytes=Encoding.ASCII.GetBytes((await ExecuteNew(nextJob))!);
+    var oldOnly=new OfflineLicenseVerifier(new Dictionary<string,byte[]> { ["test-pg"]=signingKey.ExportSubjectPublicKeyInfo() });
+    try{oldOnly.Verify(rotatedBytes,updated.InstallationKeySha256,now);throw new Exception("FAIL: unstaged trust accepted");}
+    catch(CryptographicException){Check(true,"old-only customer trust rejects new signer");}
+    updated=stores[winnerIndex].Import(rotatedBytes,now);
+    Check(updated.Revision==3 && updated.Allows("monitoring"),"staged dual-trust customer accepts new signer without losing allocation");
     var revoke=Guid.NewGuid();
     await Exec(requester, """
         INSERT INTO gc_license_jobs(id,subscription_id,kind,expected_terms_revision,allocation_id,requested_by)
-        VALUES($1,'ci-license','revoke',2,$2,'alice')
+        VALUES($1,'ci-license','revoke',3,$2,'alice')
         """,revoke,updated.AllocationId);
     Check(await Approve(revoke)==1,"revocation approved");
-    var revoked=(await Execute(revoke))!;
+    var revoked=(await ExecuteNew(revoke))!;
     Check(stores[winnerIndex].ImportRevocation(Encoding.ASCII.GetBytes(revoked),now).Validity==LicenseValidity.Revoked,"database-signed revocation accepted");
-    Check(await Execute(revoke)==revoked,"revocation retry exact bytes");
-    var retry=await Request(winnerIndex,2);
+    Check(await ExecuteNew(revoke)==revoked,"revocation retry exact bytes");
+    var retry=await Request(winnerIndex,3);
     Check(await Approve(retry)==1,"revoked renewal request approved");
-    await Denied(() => Execute(retry),"revoked allocation cannot renew");
-    var replacement=await Request(loserIndex,2);
+    await Denied(() => ExecuteNew(retry),"revoked allocation cannot renew");
+    var replacement=await Request(loserIndex,3);
     Check(await Approve(replacement)==1,"replacement request approved");
-    await Denied(() => Execute(replacement),"revoked offline seat cannot silently be reused");
+    await Denied(() => ExecuteNew(replacement),"revoked offline seat cannot silently be reused");
     await SqlDenied(() => Exec(issuer,"DELETE FROM gc_portal_audit"),"worker cannot erase audit");
     await SqlDenied(() => Exec(requester,"UPDATE gc_portal_audit SET action='edited'"),"portal cannot rewrite audit");
-    Check((long)(await Scalar(admin,"SELECT count(*) FROM gc_issuer_results"))! == 4,"only committed successful jobs have results");
+    Check((long)(await Scalar(admin,"SELECT count(*) FROM gc_issuer_results"))! == 6,"only committed successful jobs have results");
     Console.WriteLine("POSTGRES_AUTHORITY_ACCEPTANCE_PASS");
 }
 finally
