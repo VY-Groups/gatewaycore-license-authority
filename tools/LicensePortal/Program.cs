@@ -43,7 +43,12 @@ builder.WebHost.ConfigureKestrel(k =>
 });
 var db = NpgsqlDataSource.Create(config.GetConnectionString("Licensing") ??
     throw new InvalidOperationException("Licensing database required."));
+// Separate database credentials constrain the requester and reviewer SQL surfaces.
+// Both are in the portal process; a compromised process is not a dual-control boundary.
+var reviewerDb = NpgsqlDataSource.Create(config.GetConnectionString("LicensingReviewer") ??
+    throw new InvalidOperationException("Reviewer database required."));
 builder.Services.AddSingleton(db);
+builder.Services.AddKeyedSingleton("reviewer", reviewerDb);
 var app = builder.Build();
 var expectedOrigin = new Uri(config["Portal:Origin"] ?? throw new InvalidOperationException("HTTPS portal origin required."));
 if (expectedOrigin.Scheme != "https" || expectedOrigin.AbsolutePath != "/" ||
@@ -192,7 +197,7 @@ app.MapPost("/api/jobs/{id:guid}/decision", async (HttpContext ctx, Guid id, Dec
     var actor = Actor(ctx);
     if (actor.Role != "reviewer") return Results.StatusCode(403);
     if (input.Decision is not ("approved" or "rejected")) return Results.BadRequest();
-    await using var conn = await db.OpenConnectionAsync();
+    await using var conn = await reviewerDb.OpenConnectionAsync();
     await using var tx = await conn.BeginTransactionAsync();
     await using var cmd = new NpgsqlCommand("""
         UPDATE gc_license_jobs SET state=$1, approved_by=$2, approved_at=now()
