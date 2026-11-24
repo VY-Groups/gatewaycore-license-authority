@@ -22,6 +22,7 @@ jobs:
       - run: dotnet run --project tests/OfflineLicensing/OfflineLicensing.csproj --configuration Release
       - run: dotnet build tools/LicensePortal/LicensePortal.csproj --configuration Release
       - run: dotnet build tools/LicenseIssuerWorker/LicenseIssuerWorker.csproj --configuration Release
+      - run: dotnet run --project tests/ReleaseManifestAcceptance/ReleaseManifestAcceptance.csproj --configuration Release
 
   postgres-acceptance:
     runs-on: ubuntu-24.04
