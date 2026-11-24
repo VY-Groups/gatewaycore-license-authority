@@ -1,5 +1,7 @@
 # GatewayCore License Authority
 
+**[Visual architecture and workflow atlas](docs/diagrams/README.md)** — licensing, PostgreSQL, billing, trust, recovery, signing and CI diagrams.
+
 Company-side development repository; public temporarily, private before commercial operation. No production credentials, signing keys, operational customer data or issuer ledgers belong in Git, even after privatization. Previously public source cannot be made confidential retroactively.
 
 ## Components
