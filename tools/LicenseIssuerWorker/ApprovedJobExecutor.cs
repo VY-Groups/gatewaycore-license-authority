@@ -135,12 +135,13 @@ public sealed class ApprovedJobExecutor(NpgsqlDataSource db, ECDsa signer, strin
                 allocation=(string)old[0]!;revision=checked((long)old[2]!+1);
             }
             var utc=now.ToUnixTimeSeconds();
-            result=Sign("GCL1",new {schemaVersion=1,product="GatewayCore",licenseId=id,customerId=terms.CustomerId,
+            result=Sign("GCL1",new {schemaVersion=2,product="GatewayCore",licenseId=id,customerId=terms.CustomerId,siteId=site,
                 deploymentId=terms.DeploymentId,allocationId=allocation,installationKeySha256=request.InstallationKeySha256,
                 edition=terms.Edition,revision,maxNodes=terms.MaxNodes,maxSites=terms.MaxSites,issuedAt=utc,notBefore=utc,
                 expiresAt=terms.ExpiresAt,features=terms.Features});
-            if(verifier.Verify(Encoding.ASCII.GetBytes(result),request.InstallationKeySha256,now).Validity!=LicenseValidity.Active)
-                throw new InvalidOperationException("Cannot issue inactive license.");
+            var verified=verifier.Verify(Encoding.ASCII.GetBytes(result),request.InstallationKeySha256,now);
+            if(verified.Validity!=LicenseValidity.Active || verified.SiteId!=site)
+                throw new InvalidOperationException("Cannot issue inactive or incorrectly site-bound license.");
             if(old is null)
                 await Change("""
                     INSERT INTO gc_issuer_allocations(subscription_id,allocation_id,site_id,installation_hash,revision,last_expiry)
