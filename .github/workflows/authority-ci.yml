@@ -61,9 +61,12 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: VY-Groups/yarp-lb
-          ref: b92cda53c7f7a22e4497903a8a4118f9089577da
+          ref: 961b4385f68f535671c48de6d3b3d4fc03220542
           path: customer-contract
           persist-credentials: false
+      - name: Verify exact frozen customer checkout
+        shell: bash
+        run: test "$(git -C customer-contract rev-parse HEAD)" = "961b4385f68f535671c48de6d3b3d4fc03220542"
       - name: Ensure PostgreSQL recovery client tools
         run: |
           if ! command -v pg_dump || ! command -v pg_restore; then
@@ -104,9 +107,12 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: VY-Groups/yarp-lb
-          ref: b92cda53c7f7a22e4497903a8a4118f9089577da
+          ref: 961b4385f68f535671c48de6d3b3d4fc03220542
           path: customer-contract
           persist-credentials: false
+      - name: Verify exact frozen customer checkout
+        shell: bash
+        run: test "$(git -C customer-contract rev-parse HEAD)" = "961b4385f68f535671c48de6d3b3d4fc03220542"
       - run: dotnet run --project tests/CommercialCandidate/CommercialCandidate.csproj --configuration Release -- packages
   customer-protocol-snapshot:
     runs-on: ubuntu-24.04
@@ -115,8 +121,11 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: VY-Groups/yarp-lb
-          ref: b92cda53c7f7a22e4497903a8a4118f9089577da
+          ref: 961b4385f68f535671c48de6d3b3d4fc03220542
           path: customer-contract
           persist-credentials: false
+      - name: Verify exact frozen customer checkout
+        shell: bash
+        run: test "$(git -C customer-contract rev-parse HEAD)" = "961b4385f68f535671c48de6d3b3d4fc03220542"
       - name: Verify exact shared protocol snapshot
         run: diff -ru src/GatewayCore.Licensing customer-contract/src/GatewayCore.Licensing
