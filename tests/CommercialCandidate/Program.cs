@@ -14,7 +14,7 @@ if(Environment.GetEnvironmentVariable("CI")!="true" || Environment.GetEnvironmen
     args.Length!=1 || args[0] is not ("packages" or "postgres"))
     throw new InvalidOperationException("Disposable hosted CI only.");
 var customer=Path.GetFullPath("customer-contract");
-const string commit="b92cda53c7f7a22e4497903a8a4118f9089577da";
+const string commit="961b4385f68f535671c48de6d3b3d4fc03220542";
 var actual=(await Run("git",["rev-parse","HEAD"],customer)).Out.Trim();
 Check(actual==commit,"customer checkout matches exact frozen candidate revision");
 var root=Path.Combine(Path.GetTempPath(),"gc-integrated-candidate-"+Guid.NewGuid().ToString("N"));
